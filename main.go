@@ -286,9 +286,86 @@ func (t *PublicAPITester) RunAll() error {
 	return nil
 }
 
-//
-// Example Usage
-//
+// Add to main.go
+
+type PrivateAPITester struct {
+	client    *coinspot.Client
+	stream    CSVStream
+	ctx       context.Context
+	apiKey    string
+	secretKey string
+}
+
+func NewPrivateAPITester(cfg coinspot.Config, stream CSVStream, ctx context.Context, apiKey, secretKey string) *PrivateAPITester {
+	return &PrivateAPITester{
+		client:    coinspot.NewClient(cfg),
+		stream:    stream,
+		ctx:       ctx,
+		apiKey:    apiKey,
+		secretKey: secretKey,
+	}
+}
+
+func (t *PrivateAPITester) RunROTests() error {
+	ro := t.client.ReadOnlyClient() // Uses /api/v2/ro
+	tests := []struct {
+		name string
+		fn   func() error
+	}{
+		{"RO Status", func() error {
+			resp, err := ro.ROCheckStatus(t.ctx, t.apiKey, t.secretKey)
+			if err != nil {
+				return err
+			}
+			return t.stream.WriteRow([]string{"ro_status", resp.Status})
+		}},
+		{"RO Balances", func() error {
+			resp, err := ro.ROGetBalances(t.ctx, t.apiKey, t.secretKey)
+			if err != nil {
+				return err
+			}
+			if err := t.stream.WriteHeader([]string{"coin", "balance", "audbalance", "rate"}); err != nil {
+				return err
+			}
+			for coin, b := range resp.Balances {
+				if err := t.stream.WriteRow([]string{coin, fmt.Sprintf("%.8f", b.Balance), fmt.Sprintf("%.8f", b.AudBalance), fmt.Sprintf("%.8f", b.Rate)}); err != nil {
+					return err
+				}
+			}
+			return t.stream.Flush()
+		}},
+		{"RO Open Market Orders", func() error {
+			resp, err := ro.ROGetMyOpenMarketOrders(t.ctx, t.apiKey, t.secretKey, "", "")
+			if err != nil {
+				return err
+			}
+			if err := t.stream.WriteHeader([]string{"side", "id", "coin", "market", "amount", "rate", "total", "created"}); err != nil {
+				return err
+			}
+			for _, o := range resp.BuyOrders {
+				if err := t.stream.WriteRow([]string{"buy", o.ID, o.Coin, o.Market, fmt.Sprintf("%.8f", o.Amount), fmt.Sprintf("%.8f", o.Rate), fmt.Sprintf("%.8f", o.Total), o.Created}); err != nil {
+					return err
+				}
+			}
+			for _, o := range resp.SellOrders {
+				if err := t.stream.WriteRow([]string{"sell", o.ID, o.Coin, o.Market, fmt.Sprintf("%.8f", o.Amount), fmt.Sprintf("%.8f", o.Rate), fmt.Sprintf("%.8f", o.Total), o.Created}); err != nil {
+					return err
+				}
+			}
+			return t.stream.Flush()
+		}},
+	}
+
+	for _, tc := range tests {
+		fmt.Printf("▶ RO Test: %s\n", tc.name)
+		if err := tc.fn(); err != nil {
+			log.Printf("⚠ Failed %s: %v\n", tc.name, err)
+		} else {
+			fmt.Printf("✅ Completed %s\n\n", tc.name)
+		}
+	}
+	return nil
+}
 
 func main() {
 	// Option 1: Stream to stdout
