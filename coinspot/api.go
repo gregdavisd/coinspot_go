@@ -176,8 +176,8 @@ func (c *Client) ReadOnlyClient() *Client {
 	}
 }
 
-// SubmitClient returns a client configured for the Submit API (POST requests, requires auth).
-func (c *Client) SubmitClient() *Client {
+// TradeClient returns a client configured for the trading API, performs transactions on Coinspot (POST requests, requires auth).
+func (c *Client) TradeClient() *Client {
 	return &Client{
 		HTTPClient:  c.HTTPClient,
 		BaseURL:     c.BaseURL + "/api/v2",
