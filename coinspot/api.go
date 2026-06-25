@@ -1,5 +1,34 @@
 package coinspot
 
+// API Architecture & Tiers
+// The API is divided into three distinct tiers, each with specific routing and access requirements:
+//
+// Public API (/pubapi/v2): GET-only, unauthenticated. Provides real-time market data (latest prices, buy/sell rates, order book snapshots for top 20–100 orders).
+// Full Access API (/api/v2): POST-only, requires standard API key. Enables trading operations (market/instant buys/sells/swaps, order placement/editing, cancellation, and withdrawals).
+// Read-Only API (/api/v2/ro): POST-only, requires dedicated RO key. Provides account visibility (balances, order history, deposits/withdrawals, affiliate/referral payments) without executing trades.
+//
+// Authentication & Security
+// Headers: All POST requests must include key (API key) and sign (HMAC-SHA512 signature).
+// Signature Mechanism: sign is computed by HMAC-SHA512 hashing the form-encoded POST body using the secret key.
+// Nonce Requirement: A strictly increasing integer must be included in every POST request to prevent replay attacks.
+// Error Format: Non-200 responses or API errors return {"status":"error", "message":"..."}. Successful responses return {"status":"ok"} alongside payload data.
+//
+// Data & Payload Constraints
+// Format: All requests/responses are JSON. Dates/times are UTC ISO 8601.
+// Precision Limits: Crypto amounts support up to 8 decimal places; AUD amounts support 2 decimal places.
+// Optional Parameters: Many endpoints support filtering (e.g., markettype, startdate/enddate, limit). Defaults are clearly documented (e.g., limit defaults to 200, max 500 for history endpoints).
+// Network Dependencies: Withdrawal endpoints require network-specific details (paymentid, fee, minsend) fetched via /my/coin/withdraw/senddetails.
+//
+// Operational Constraints & Best Practices
+// Rate Limiting: Hard cap of 1,000 requests per minute across all endpoints.
+// Cancellation Warning: Frequent cancel requests may trigger automated rate limiting. Editing open orders is recommended for price adjustments.
+// Timeouts & Retries: The documentation does not mandate client-side retry logic, but notes that network or server errors may occur, implying robust client handling is necessary.
+// Key Management: API keys are tied to registered accounts. RO keys are separate and restricted to read operations.
+//
+// Implementation Context
+// Directly implements the documented specifications while extending them with production-grade reliability: thread-safe nonce generation, client-side rate limiting, exponential backoff retries, and type-safe JSON unmarshaling.
+// This API is designed for deterministic, secure, and high-throughput interactions, with clear boundaries between public data access, authenticated trading, and account monitoring.
+
 import (
 	"bytes"
 	"context"
@@ -32,7 +61,7 @@ func nextNonce() int64 {
 	return nonce
 }
 
-// Configuration & Client
+// RetryConfig holds retry policy settings for HTTP requests.
 type RetryConfig struct {
 	MaxRetries     int           // Max attempts before failing (0 = no retry)
 	BaseDelay      time.Duration // Initial delay (e.g., 500ms)
@@ -111,8 +140,9 @@ func (rl *rateLimiter) wait(ctx context.Context) error {
 	return nil
 }
 
-// NewClient creates a new CoinSpot client.
-// Automatically prepends "https://" to the provided domain.
+// NewClient creates a new CoinSpot API client with the given configuration.
+// It automatically prepends "https://" to the domain if no scheme is provided.
+// Retry configuration defaults are applied if not specified.
 func NewClient(cfg Config) *Client {
 	baseURL := cfg.BaseURL
 	if !strings.HasPrefix(baseURL, "http://") && !strings.HasPrefix(baseURL, "https://") {
@@ -262,6 +292,7 @@ func (c *Client) doRequest(ctx context.Context, method, path string, params url.
 	}
 	return nil, lastErr
 }
+
 func isRetryableStatusCode(code int, codes []int) bool {
 	if code == 0 {
 		return true // Network errors are retryable
@@ -357,10 +388,6 @@ func decodePublicResponse[T any](ctx context.Context, path string, params url.Va
 	}
 	return &result, nil
 }
-
-//
-// StringAsFloat64 Custom Type
-//
 
 // stringAsFloat64 handles JSON unmarshaling of numeric values that may come as strings or numbers.
 type stringAsFloat64 float64
@@ -721,50 +748,62 @@ func (c *Client) GetLatestPrices(ctx context.Context) (*LatestPricesResponse, er
 	return decodePublicResponse[LatestPricesResponse](ctx, "/latest", url.Values{}, c)
 }
 
+// GetLatestCoinPrices returns the latest prices for a specific coin.
 func (c *Client) GetLatestCoinPrices(ctx context.Context, coinType string) (*LatestCoinPricesResponse, error) {
 	return decodePublicResponse[LatestCoinPricesResponse](ctx, fmt.Sprintf("/latest/%s", coinType), url.Values{}, c)
 }
 
+// GetLatestCoinMarketPrices returns the latest prices for a specific coin and market pair.
 func (c *Client) GetLatestCoinMarketPrices(ctx context.Context, coinType, marketType string) (*LatestCoinMarketPricesResponse, error) {
 	return decodePublicResponse[LatestCoinMarketPricesResponse](ctx, fmt.Sprintf("/latest/%s/%s", coinType, marketType), url.Values{}, c)
 }
 
+// GetLatestBuyPrice returns the latest buy price for a specific coin.
 func (c *Client) GetLatestBuyPrice(ctx context.Context, coinType string) (*LatestPriceResponse, error) {
 	return decodePublicResponse[LatestPriceResponse](ctx, fmt.Sprintf("/buyprice/%s", coinType), url.Values{}, c)
 }
 
+// GetLatestBuyPriceMarket returns the latest buy price for a specific coin and market pair.
 func (c *Client) GetLatestBuyPriceMarket(ctx context.Context, coinType, marketType string) (*LatestPriceResponse, error) {
 	return decodePublicResponse[LatestPriceResponse](ctx, fmt.Sprintf("/buyprice/%s/%s", coinType, marketType), url.Values{}, c)
 }
 
+// GetLatestSellPrice returns the latest sell price for a specific coin.
 func (c *Client) GetLatestSellPrice(ctx context.Context, coinType string) (*LatestPriceResponse, error) {
 	return decodePublicResponse[LatestPriceResponse](ctx, fmt.Sprintf("/sellprice/%s", coinType), url.Values{}, c)
 }
 
+// GetLatestSellPriceMarket returns the latest sell price for a specific coin and market pair.
 func (c *Client) GetLatestSellPriceMarket(ctx context.Context, coinType, marketType string) (*LatestPriceResponse, error) {
 	return decodePublicResponse[LatestPriceResponse](ctx, fmt.Sprintf("/sellprice/%s/%s", coinType, marketType), url.Values{}, c)
 }
 
+// GetOpenOrders returns open buy and sell orders for a specific coin.
 func (c *Client) GetOpenOrders(ctx context.Context, coinType string) (*OpenOrdersResponse, error) {
 	return decodePublicResponse[OpenOrdersResponse](ctx, fmt.Sprintf("/orders/open/%s", coinType), url.Values{}, c)
 }
 
+// GetOpenOrdersMarket returns open buy and sell orders for a specific coin and market pair.
 func (c *Client) GetOpenOrdersMarket(ctx context.Context, coinType, marketType string) (*OpenOrdersMarketResponse, error) {
 	return decodePublicResponse[OpenOrdersMarketResponse](ctx, fmt.Sprintf("/orders/open/%s/%s", coinType, marketType), url.Values{}, c)
 }
 
+// GetCompletedOrders returns completed buy and sell orders for a specific coin.
 func (c *Client) GetCompletedOrders(ctx context.Context, coinType string) (*CompletedOrdersResponse, error) {
 	return decodePublicResponse[CompletedOrdersResponse](ctx, fmt.Sprintf("/orders/completed/%s", coinType), url.Values{}, c)
 }
 
+// GetCompletedOrdersMarket returns completed buy and sell orders for a specific coin and market pair.
 func (c *Client) GetCompletedOrdersMarket(ctx context.Context, coinType, marketType string) (*CompletedOrdersMarketResponse, error) {
 	return decodePublicResponse[CompletedOrdersMarketResponse](ctx, fmt.Sprintf("/orders/completed/%s/%s", coinType, marketType), url.Values{}, c)
 }
 
+// GetCompletedOrdersSummary returns a summary of completed orders for a specific coin.
 func (c *Client) GetCompletedOrdersSummary(ctx context.Context, coinType string) (*CompletedOrdersSummaryResponse, error) {
 	return decodePublicResponse[CompletedOrdersSummaryResponse](ctx, fmt.Sprintf("/orders/summary/completed/%s", coinType), url.Values{}, c)
 }
 
+// GetCompletedOrdersSummaryMarket returns a summary of completed orders for a specific coin and market pair.
 func (c *Client) GetCompletedOrdersSummaryMarket(ctx context.Context, coinType, marketType string) (*CompletedOrdersSummaryMarketResponse, error) {
 	return decodePublicResponse[CompletedOrdersSummaryMarketResponse](ctx, fmt.Sprintf("/orders/summary/completed/%s/%s", coinType, marketType), url.Values{}, c)
 }
@@ -773,40 +812,48 @@ func (c *Client) GetCompletedOrdersSummaryMarket(ctx context.Context, coinType, 
 // Private API Methods (POST)
 //
 
+// CheckStatus checks if the API connection is working correctly.
 func (c *Client) CheckStatus(ctx context.Context, apiKey, secretKey string) (*StatusResponse, error) {
 	return decodeResponse[StatusResponse](ctx, "/status", url.Values{}, apiKey, secretKey, c)
 }
 
+// GetDepositAddress returns the deposit address for a specific coin type.
 func (c *Client) GetDepositAddress(ctx context.Context, apiKey, secretKey string, coinType string) (*DepositAddressResponse, error) {
 	return decodeResponse[DepositAddressResponse](ctx, "/my/coin/deposit", url.Values{"cointype": {coinType}}, apiKey, secretKey, c)
 }
 
+// GetBuyNowCoinList returns the list of coins available for immediate buy (BuyNow).
 func (c *Client) GetBuyNowCoinList(ctx context.Context, apiKey, secretKey string) (*CoinListResponse, error) {
 	return decodeResponse[CoinListResponse](ctx, "/my/buy/now/coinlist", url.Values{}, apiKey, secretKey, c)
 }
 
+// GetSellNowCoinList returns the list of coins available for immediate sell (SellNow).
 func (c *Client) GetSellNowCoinList(ctx context.Context, apiKey, secretKey string) (*CoinListResponse, error) {
 	return decodeResponse[CoinListResponse](ctx, "/my/sell/now/coinlist", url.Values{}, apiKey, secretKey, c)
 }
 
+// GetBuyNowQuote returns a quote for immediate purchase of a coin.
 func (c *Client) GetBuyNowQuote(ctx context.Context, apiKey, secretKey string, coinType string, amount float64, amountType string) (*QuoteResponse, error) {
 	return decodeResponse[QuoteResponse](ctx, "/quote/buy/now", url.Values{
 		"cointype": {coinType}, "amount": {fmt.Sprintf("%.8f", amount)}, "amounttype": {amountType},
 	}, apiKey, secretKey, c)
 }
 
+// GetSellNowQuote returns a quote for immediate sale of a coin.
 func (c *Client) GetSellNowQuote(ctx context.Context, apiKey, secretKey string, coinType string, amount float64, amountType string) (*QuoteResponse, error) {
 	return decodeResponse[QuoteResponse](ctx, "/quote/sell/now", url.Values{
 		"cointype": {coinType}, "amount": {fmt.Sprintf("%.8f", amount)}, "amounttype": {amountType},
 	}, apiKey, secretKey, c)
 }
 
+// GetSwapNowQuote returns a quote for immediate swap of one coin for another.
 func (c *Client) GetSwapNowQuote(ctx context.Context, apiKey, secretKey string, coinTypeSell, coinTypeBuy string, amount float64) (*QuoteResponse, error) {
 	return decodeResponse[QuoteResponse](ctx, "/quote/swap/now", url.Values{
 		"cointypesell": {coinTypeSell}, "cointypebuy": {coinTypeBuy}, "amount": {fmt.Sprintf("%.8f", amount)},
 	}, apiKey, secretKey, c)
 }
 
+// PlaceMarketBuy places a buy order at a specific market price.
 func (c *Client) PlaceMarketBuy(ctx context.Context, apiKey, secretKey string, coinType string, amount, rate float64, marketType string) (*OrderResponse, error) {
 	p := url.Values{"cointype": {coinType}, "amount": {fmt.Sprintf("%.8f", amount)}, "rate": {fmt.Sprintf("%.8f", rate)}}
 	if marketType != "" {
@@ -815,12 +862,14 @@ func (c *Client) PlaceMarketBuy(ctx context.Context, apiKey, secretKey string, c
 	return decodeResponse[OrderResponse](ctx, "/my/buy", p, apiKey, secretKey, c)
 }
 
+// EditOpenMarketBuy edits an open market buy order with a new rate.
 func (c *Client) EditOpenMarketBuy(ctx context.Context, apiKey, secretKey string, coinType, orderID string, currentRate, newRate float64) (*EditOrderResponse, error) {
 	return decodeResponse[EditOrderResponse](ctx, "/my/buy/edit", url.Values{
 		"cointype": {coinType}, "id": {orderID}, "rate": {fmt.Sprintf("%.8f", currentRate)}, "newrate": {fmt.Sprintf("%.8f", newRate)},
 	}, apiKey, secretKey, c)
 }
 
+// PlaceBuyNow places an immediate buy order with optional configuration.
 func (c *Client) PlaceBuyNow(ctx context.Context, apiKey, secretKey string, coinType string, amountType string, amount float64, opts ...BuyNowOpt) (*BuyNowResponse, error) {
 	p := url.Values{"cointype": {coinType}, "amounttype": {amountType}, "amount": {fmt.Sprintf("%.2f", amount)}}
 	for _, o := range opts {
@@ -829,6 +878,7 @@ func (c *Client) PlaceBuyNow(ctx context.Context, apiKey, secretKey string, coin
 	return decodeResponse[BuyNowResponse](ctx, "/my/buy/now", p, apiKey, secretKey, c)
 }
 
+// PlaceMarketSell places a sell order at a specific market price.
 func (c *Client) PlaceMarketSell(ctx context.Context, apiKey, secretKey string, coinType string, amount, rate float64, marketType string) (*OrderResponse, error) {
 	p := url.Values{"cointype": {coinType}, "amount": {fmt.Sprintf("%.8f", amount)}, "rate": {fmt.Sprintf("%.8f", rate)}}
 	if marketType != "" {
@@ -837,12 +887,14 @@ func (c *Client) PlaceMarketSell(ctx context.Context, apiKey, secretKey string, 
 	return decodeResponse[OrderResponse](ctx, "/my/sell", p, apiKey, secretKey, c)
 }
 
+// EditOpenMarketSell edits an open market sell order with a new rate.
 func (c *Client) EditOpenMarketSell(ctx context.Context, apiKey, secretKey string, coinType, orderID string, currentRate, newRate float64) (*EditOrderResponse, error) {
 	return decodeResponse[EditOrderResponse](ctx, "/my/sell/edit", url.Values{
 		"cointype": {coinType}, "id": {orderID}, "rate": {fmt.Sprintf("%.8f", currentRate)}, "newrate": {fmt.Sprintf("%.8f", newRate)},
 	}, apiKey, secretKey, c)
 }
 
+// PlaceSellNow places an immediate sell order with optional configuration.
 func (c *Client) PlaceSellNow(ctx context.Context, apiKey, secretKey string, coinType string, amountType string, amount float64, opts ...SellNowOpt) (*SellNowResponse, error) {
 	p := url.Values{"cointype": {coinType}, "amounttype": {amountType}, "amount": {fmt.Sprintf("%.8f", amount)}}
 	for _, o := range opts {
@@ -851,6 +903,7 @@ func (c *Client) PlaceSellNow(ctx context.Context, apiKey, secretKey string, coi
 	return decodeResponse[SellNowResponse](ctx, "/my/sell/now", p, apiKey, secretKey, c)
 }
 
+// PlaceSwapNow places an immediate swap order of one coin for another with optional configuration.
 func (c *Client) PlaceSwapNow(ctx context.Context, apiKey, secretKey string, coinTypeSell, coinTypeBuy string, amount float64, opts ...SwapNowOpt) (*SwapNowResponse, error) {
 	p := url.Values{"cointypesell": {coinTypeSell}, "cointypebuy": {coinTypeBuy}, "amount": {fmt.Sprintf("%.8f", amount)}}
 	for _, o := range opts {
@@ -859,10 +912,12 @@ func (c *Client) PlaceSwapNow(ctx context.Context, apiKey, secretKey string, coi
 	return decodeResponse[SwapNowResponse](ctx, "/my/swap/now", p, apiKey, secretKey, c)
 }
 
+// CancelBuyOrder cancels a specific open buy order.
 func (c *Client) CancelBuyOrder(ctx context.Context, apiKey, secretKey string, orderID string) (*CancelResponse, error) {
 	return decodeResponse[CancelResponse](ctx, "/my/buy/cancel", url.Values{"id": {orderID}}, apiKey, secretKey, c)
 }
 
+// CancelAllBuyOrders cancels all open buy orders, optionally filtered by coin.
 func (c *Client) CancelAllBuyOrders(ctx context.Context, apiKey, secretKey string, coin string) (*CancelResponse, error) {
 	p := url.Values{}
 	if coin != "" {
@@ -871,10 +926,12 @@ func (c *Client) CancelAllBuyOrders(ctx context.Context, apiKey, secretKey strin
 	return decodeResponse[CancelResponse](ctx, "/my/buy/cancel/all", p, apiKey, secretKey, c)
 }
 
+// CancelSellOrder cancels a specific open sell order.
 func (c *Client) CancelSellOrder(ctx context.Context, apiKey, secretKey string, orderID string) (*CancelResponse, error) {
 	return decodeResponse[CancelResponse](ctx, "/my/sell/cancel", url.Values{"id": {orderID}}, apiKey, secretKey, c)
 }
 
+// CancelAllSellOrders cancels all open sell orders, optionally filtered by coin.
 func (c *Client) CancelAllSellOrders(ctx context.Context, apiKey, secretKey string, coin string) (*CancelResponse, error) {
 	p := url.Values{}
 	if coin != "" {
@@ -883,10 +940,12 @@ func (c *Client) CancelAllSellOrders(ctx context.Context, apiKey, secretKey stri
 	return decodeResponse[CancelResponse](ctx, "/my/sell/cancel/all", p, apiKey, secretKey, c)
 }
 
+// GetWithdrawDetails returns withdrawal details and network fees for a specific coin.
 func (c *Client) GetWithdrawDetails(ctx context.Context, apiKey, secretKey string, coinType string) (*WithdrawDetailsResponse, error) {
 	return decodeResponse[WithdrawDetailsResponse](ctx, "/my/coin/withdraw/senddetails", url.Values{"cointype": {coinType}}, apiKey, secretKey, c)
 }
 
+// SendWithdraw sends a cryptocurrency withdrawal to the specified address.
 func (c *Client) SendWithdraw(ctx context.Context, apiKey, secretKey string, coinType string, amount, address string, opts ...WithdrawOpt) (*WithdrawResponse, error) {
 	p := url.Values{"cointype": {coinType}, "amount": {amount}, "address": {address}}
 	for _, o := range opts {
@@ -899,10 +958,12 @@ func (c *Client) SendWithdraw(ctx context.Context, apiKey, secretKey string, coi
 // Read-Only API Methods (POST)
 //
 
+// ROCheckStatus checks if the read-only API connection is working correctly.
 func (c *Client) ROCheckStatus(ctx context.Context, apiKey, secretKey string) (*StatusResponse, error) {
 	return decodeResponse[StatusResponse](ctx, "/status", url.Values{}, apiKey, secretKey, c)
 }
 
+// ROGetOpenMarketOrders returns open buy and sell market orders, optionally filtered by market.
 func (c *Client) ROGetOpenMarketOrders(ctx context.Context, apiKey, secretKey string, coinType, marketType string) (*MarketOrdersResponse, error) {
 	p := url.Values{"cointype": {coinType}}
 	if marketType != "" {
@@ -911,6 +972,7 @@ func (c *Client) ROGetOpenMarketOrders(ctx context.Context, apiKey, secretKey st
 	return decodeResponse[MarketOrdersResponse](ctx, "/orders/market/open", p, apiKey, secretKey, c)
 }
 
+// ROGetCompletedMarketOrders returns completed market orders with optional date range and limit filters.
 func (c *Client) ROGetCompletedMarketOrders(ctx context.Context, apiKey, secretKey string, coinType, marketType, startDate, endDate string, limit int) (*MarketOrdersResponse, error) {
 	p := url.Values{"cointype": {coinType}}
 	if marketType != "" {
@@ -928,14 +990,17 @@ func (c *Client) ROGetCompletedMarketOrders(ctx context.Context, apiKey, secretK
 	return decodeResponse[MarketOrdersResponse](ctx, "/orders/market/completed", p, apiKey, secretKey, c)
 }
 
+// ROGetBalances returns account balances for all coins.
 func (c *Client) ROGetBalances(ctx context.Context, apiKey, secretKey string) (*BalancesResponse, error) {
 	return decodeResponse[BalancesResponse](ctx, "/my/balances", url.Values{}, apiKey, secretKey, c)
 }
 
+// ROGetBalance returns the balance for a specific coin.
 func (c *Client) ROGetBalance(ctx context.Context, apiKey, secretKey string, coinType, available string) (*BalanceResponse, error) {
 	return decodeResponse[BalanceResponse](ctx, fmt.Sprintf("/my/balance/%s", coinType), url.Values{"available": {available}}, apiKey, secretKey, c)
 }
 
+// ROGetMyOpenMarketOrders returns user's open market orders, optionally filtered by coin and market.
 func (c *Client) ROGetMyOpenMarketOrders(ctx context.Context, apiKey, secretKey string, coinType, marketType string) (*MarketOrdersResponse, error) {
 	p := url.Values{}
 	if coinType != "" {
@@ -947,10 +1012,12 @@ func (c *Client) ROGetMyOpenMarketOrders(ctx context.Context, apiKey, secretKey 
 	return decodeResponse[MarketOrdersResponse](ctx, "/my/orders/market/open", p, apiKey, secretKey, c)
 }
 
+// ROGetMyOpenLimitOrders returns user's open limit orders for a specific coin.
 func (c *Client) ROGetMyOpenLimitOrders(ctx context.Context, apiKey, secretKey string, coinType string) (*OpenLimitOrdersResponse, error) {
 	return decodeResponse[OpenLimitOrdersResponse](ctx, "/my/orders/limit/open", url.Values{"cointype": {coinType}}, apiKey, secretKey, c)
 }
 
+// ROGetOrderHistory returns order history with optional date range and limit filters.
 func (c *Client) ROGetOrderHistory(ctx context.Context, apiKey, secretKey string, coinType, marketType, startDate, endDate string, limit int) (*OrderHistoryResponse, error) {
 	p := url.Values{}
 	if coinType != "" {
@@ -971,6 +1038,7 @@ func (c *Client) ROGetOrderHistory(ctx context.Context, apiKey, secretKey string
 	return decodeResponse[OrderHistoryResponse](ctx, "/my/orders/completed", p, apiKey, secretKey, c)
 }
 
+// ROGetMarketOrderHistory returns market order history with optional date range and limit filters.
 func (c *Client) ROGetMarketOrderHistory(ctx context.Context, apiKey, secretKey string, coinType, marketType, startDate, endDate string, limit int) (*OrderHistoryResponse, error) {
 	p := url.Values{}
 	if coinType != "" {
@@ -991,6 +1059,7 @@ func (c *Client) ROGetMarketOrderHistory(ctx context.Context, apiKey, secretKey 
 	return decodeResponse[OrderHistoryResponse](ctx, "/my/orders/market/completed", p, apiKey, secretKey, c)
 }
 
+// ROGetSendReceiveHistory returns send and receive transaction history with optional date range filter.
 func (c *Client) ROGetSendReceiveHistory(ctx context.Context, apiKey, secretKey string, startDate, endDate string) (*SendReceiveHistoryResponse, error) {
 	p := url.Values{}
 	if startDate != "" {
@@ -1002,6 +1071,7 @@ func (c *Client) ROGetSendReceiveHistory(ctx context.Context, apiKey, secretKey 
 	return decodeResponse[SendReceiveHistoryResponse](ctx, "/my/sendreceive", p, apiKey, secretKey, c)
 }
 
+// ROGetDepositHistory returns deposit history with optional date range filter.
 func (c *Client) ROGetDepositHistory(ctx context.Context, apiKey, secretKey string, startDate, endDate string) (*DepositHistoryResponse, error) {
 	p := url.Values{}
 	if startDate != "" {
@@ -1013,6 +1083,7 @@ func (c *Client) ROGetDepositHistory(ctx context.Context, apiKey, secretKey stri
 	return decodeResponse[DepositHistoryResponse](ctx, "/my/deposits", p, apiKey, secretKey, c)
 }
 
+// ROGetWithdrawalHistory returns withdrawal history with optional date range filter.
 func (c *Client) ROGetWithdrawalHistory(ctx context.Context, apiKey, secretKey string, startDate, endDate string) (*WithdrawalHistoryResponse, error) {
 	p := url.Values{}
 	if startDate != "" {
@@ -1024,10 +1095,12 @@ func (c *Client) ROGetWithdrawalHistory(ctx context.Context, apiKey, secretKey s
 	return decodeResponse[WithdrawalHistoryResponse](ctx, "/my/withdrawals", p, apiKey, secretKey, c)
 }
 
+// ROGetAffiliatePayments returns affiliate payment history.
 func (c *Client) ROGetAffiliatePayments(ctx context.Context, apiKey, secretKey string) (*PaymentResponse, error) {
 	return decodeResponse[PaymentResponse](ctx, "/my/affiliatepayments", url.Values{}, apiKey, secretKey, c)
 }
 
+// ROGetReferralPayments returns referral payment history.
 func (c *Client) ROGetReferralPayments(ctx context.Context, apiKey, secretKey string) (*PaymentResponse, error) {
 	return decodeResponse[PaymentResponse](ctx, "/my/referralpayments", url.Values{}, apiKey, secretKey, c)
 }
@@ -1036,50 +1109,74 @@ func (c *Client) ROGetReferralPayments(ctx context.Context, apiKey, secretKey st
 // Functional Options (Optional Configuration)
 //
 
+// BuyNowOpt is a functional option for configuring BuyNow orders.
 type BuyNowOpt func(url.Values)
 
+// WithRate sets the rate/price limit for a BuyNow order.
 func WithRate(rate float64) BuyNowOpt {
 	return func(p url.Values) { p.Set("rate", fmt.Sprintf("%.8f", rate)) }
 }
+
+// WithThreshold sets the acceptable price threshold for a BuyNow order.
 func WithThreshold(threshold float64) BuyNowOpt {
 	return func(p url.Values) { p.Set("threshold", fmt.Sprintf("%.8f", threshold)) }
 }
+
+// WithDirection sets the price direction preference for a BuyNow order.
 func WithDirection(dir string) BuyNowOpt {
 	return func(p url.Values) { p.Set("direction", dir) }
 }
 
+// SellNowOpt is a functional option for configuring SellNow orders.
 type SellNowOpt func(url.Values)
 
+// WithSellRate sets the rate/price limit for a SellNow order.
 func WithSellRate(rate float64) SellNowOpt {
 	return func(p url.Values) { p.Set("rate", fmt.Sprintf("%.8f", rate)) }
 }
+
+// WithSellThreshold sets the acceptable price threshold for a SellNow order.
 func WithSellThreshold(threshold float64) SellNowOpt {
 	return func(p url.Values) { p.Set("threshold", fmt.Sprintf("%.8f", threshold)) }
 }
+
+// WithSellDirection sets the price direction preference for a SellNow order.
 func WithSellDirection(dir string) SellNowOpt {
 	return func(p url.Values) { p.Set("direction", dir) }
 }
 
+// SwapNowOpt is a functional option for configuring SwapNow orders.
 type SwapNowOpt func(url.Values)
 
+// WithSwapRate sets the rate/price limit for a SwapNow order.
 func WithSwapRate(rate float64) SwapNowOpt {
 	return func(p url.Values) { p.Set("rate", fmt.Sprintf("%.8f", rate)) }
 }
+
+// WithSwapThreshold sets the acceptable price threshold for a SwapNow order.
 func WithSwapThreshold(threshold float64) SwapNowOpt {
 	return func(p url.Values) { p.Set("threshold", fmt.Sprintf("%.8f", threshold)) }
 }
+
+// WithSwapDirection sets the price direction preference for a SwapNow order.
 func WithSwapDirection(dir string) SwapNowOpt {
 	return func(p url.Values) { p.Set("direction", dir) }
 }
 
+// WithdrawOpt is a functional option for configuring withdrawal requests.
 type WithdrawOpt func(url.Values)
 
+// WithEmailConfirm sets whether email confirmation is required for the withdrawal.
 func WithEmailConfirm(emailConfirm string) WithdrawOpt {
 	return func(p url.Values) { p.Set("emailconfirm", emailConfirm) }
 }
+
+// WithNetwork sets the network to use for the withdrawal.
 func WithNetwork(network string) WithdrawOpt {
 	return func(p url.Values) { p.Set("network", network) }
 }
+
+// WithPaymentID sets the payment ID for the withdrawal.
 func WithPaymentID(paymentID string) WithdrawOpt {
 	return func(p url.Values) { p.Set("paymentid", paymentID) }
 }
