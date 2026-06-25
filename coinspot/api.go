@@ -32,15 +32,20 @@ func nextNonce() int64 {
 	return nonce
 }
 
-//
 // Configuration & Client
-//
+type RetryConfig struct {
+	MaxRetries     int           // Max attempts before failing (0 = no retry)
+	BaseDelay      time.Duration // Initial delay (e.g., 500ms)
+	MaxDelay       time.Duration // Cap delay (e.g., 10s)
+	RetryableCodes []int         // HTTP codes to retry on (default: 429, 500-504)
+}
 
 // Config holds the client initialization parameters.
 type Config struct {
 	// BaseURL is the domain without protocol. e.g., "www.coinspot.com.au"
 	BaseURL         string
 	RateLimitPerMin int64 // 0 disables rate limiting
+	RetryConfig     RetryConfig
 }
 
 // Client represents the CoinSpot API client.
@@ -49,6 +54,7 @@ type Client struct {
 	HTTPClient  *http.Client
 	BaseURL     string
 	RateLimiter *rateLimiter
+	RetryConfig RetryConfig
 }
 
 // rateLimiter enforces a fixed delay between consecutive requests across all goroutines.
@@ -113,6 +119,20 @@ func NewClient(cfg Config) *Client {
 		baseURL = "https://" + baseURL
 	}
 
+	// Set sensible defaults for retry config
+	if cfg.RetryConfig.MaxRetries == 0 {
+		cfg.RetryConfig.MaxRetries = 3
+	}
+	if cfg.RetryConfig.BaseDelay == 0 {
+		cfg.RetryConfig.BaseDelay = 500 * time.Millisecond
+	}
+	if cfg.RetryConfig.MaxDelay == 0 {
+		cfg.RetryConfig.MaxDelay = 10 * time.Second
+	}
+	if len(cfg.RetryConfig.RetryableCodes) == 0 {
+		cfg.RetryConfig.RetryableCodes = []int{429, 500, 502, 503, 504}
+	}
+
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
 			Timeout:   30 * time.Second,
@@ -132,6 +152,7 @@ func NewClient(cfg Config) *Client {
 		},
 		BaseURL:     baseURL,
 		RateLimiter: newRateLimiter(cfg.RateLimitPerMin),
+		RetryConfig: cfg.RetryConfig,
 	}
 }
 
@@ -141,6 +162,7 @@ func (c *Client) PublicClient() *Client {
 		HTTPClient:  c.HTTPClient,
 		BaseURL:     c.BaseURL + "/pubapi/v2",
 		RateLimiter: c.RateLimiter,
+		RetryConfig: c.RetryConfig,
 	}
 }
 
@@ -150,6 +172,17 @@ func (c *Client) ReadOnlyClient() *Client {
 		HTTPClient:  c.HTTPClient,
 		BaseURL:     c.BaseURL + "/api/v2/ro",
 		RateLimiter: c.RateLimiter,
+		RetryConfig: c.RetryConfig,
+	}
+}
+
+// SubmitClient returns a client configured for the Submit API (POST requests, requires auth).
+func (c *Client) SubmitClient() *Client {
+	return &Client{
+		HTTPClient:  c.HTTPClient,
+		BaseURL:     c.BaseURL + "/api/v2",
+		RateLimiter: c.RateLimiter,
+		RetryConfig: c.RetryConfig,
 	}
 }
 
@@ -158,51 +191,112 @@ func (c *Client) ReadOnlyClient() *Client {
 //
 
 func (c *Client) doRequest(ctx context.Context, method, path string, params url.Values, apiKey, secretKey string) ([]byte, error) {
-	// 🔒 GLOBAL CHOKE POINT: Enforce pacing across all goroutines
-	if err := c.RateLimiter.wait(ctx); err != nil {
-		return nil, fmt.Errorf("rate limiter wait failed: %w", err)
-	}
-	var req *http.Request
-	var err error
+	var lastErr error
+	var lastStatusCode int
 
-	if method == http.MethodGet {
-		// Public API uses GET with query parameters
-		queryStr := params.Encode()
-		if queryStr != "" {
-			path += "?" + queryStr
+	for attempt := 0; attempt <= c.RetryConfig.MaxRetries; attempt++ {
+		// Enforce client-side rate limiting
+		if err := c.RateLimiter.wait(ctx); err != nil {
+			return nil, err
 		}
-		req, err = http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
-	} else {
-		// Private/RO API uses POST with form-encoded body
-		params.Set("nonce", fmt.Sprintf("%d", nextNonce()))
-		req, err = http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewBufferString(params.Encode()))
+
+		var req *http.Request
+		var err error
+
+		if method == http.MethodGet {
+			queryStr := params.Encode()
+			if queryStr != "" {
+				path += "?" + queryStr
+			}
+			req, err = http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+		} else {
+			// Copy params to avoid modifying caller's url.Values
+			postParams := url.Values{}
+			for k, v := range params {
+				postParams[k] = append([]string{}, v...)
+			}
+			postParams.Set("nonce", fmt.Sprintf("%d", nextNonce()))
+			req, err = http.NewRequestWithContext(ctx, http.MethodPost, c.BaseURL+path, bytes.NewBufferString(postParams.Encode()))
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			req.Header.Set("key", apiKey)
+			req.Header.Set("sign", signData(secretKey, postParams))
+		}
 		if err != nil {
 			return nil, err
 		}
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Set("key", apiKey)
-		req.Header.Set("sign", signData(secretKey, params))
-	}
-	if err != nil {
-		return nil, err
-	}
 
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+		resp, err := c.HTTPClient.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("request failed: %w", err)
+			lastStatusCode = 0
+		} else {
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = fmt.Errorf("failed to read response: %w", err)
+				lastStatusCode = 0
+			} else {
+				lastStatusCode = resp.StatusCode
+				if lastStatusCode >= 500 || lastStatusCode == 429 {
+					lastErr = fmt.Errorf("server error %d: %s", lastStatusCode, string(body))
+				} else if lastStatusCode != http.StatusOK {
+					lastErr = fmt.Errorf("API request failed with status %d: %s", lastStatusCode, string(body))
+				} else {
+					return body, nil
+				}
+			}
+		}
 
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		// Retry logic
+		if attempt < c.RetryConfig.MaxRetries && isRetryableStatusCode(lastStatusCode, c.RetryConfig.RetryableCodes) {
+			delay := c.calculateBackoff(attempt)
+			if err := waitWithContext(ctx, delay); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		return nil, lastErr
 	}
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+	return nil, lastErr
+}
+func isRetryableStatusCode(code int, codes []int) bool {
+	if code == 0 {
+		return true // Network errors are retryable
 	}
+	for _, c := range codes {
+		if c == code {
+			return true
+		}
+	}
+	return false
+}
 
-	return body, nil
+func (c *Client) calculateBackoff(attempt int) time.Duration {
+	d := c.RetryConfig.BaseDelay
+	if attempt > 0 {
+		d = c.RetryConfig.BaseDelay << uint(attempt) // Exponential: 1x, 2x, 4x...
+	}
+	if d > c.RetryConfig.MaxDelay {
+		d = c.RetryConfig.MaxDelay
+	}
+	// Add 0-50% jitter to prevent thundering herd
+	jitter := time.Duration(rand.Int63n(int64(d) / 2))
+	return d + jitter
+}
+
+func waitWithContext(ctx context.Context, d time.Duration) error {
+	if d <= 0 {
+		return nil
+	}
+	select {
+	case <-time.After(d):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // signData computes HMAC-SHA512 of the form-encoded parameters.
