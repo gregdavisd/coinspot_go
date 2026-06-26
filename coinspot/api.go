@@ -1,5 +1,8 @@
 package coinspot
 
+//	CoinSpot API Client for Go
+// see: https://www.coinspot.com.au/v2/api
+
 // API Architecture & Tiers
 // The API is divided into three distinct tiers, each with specific routing and access requirements:
 //
@@ -858,6 +861,8 @@ func (c *Client) PlaceMarketBuy(ctx context.Context, apiKey, secretKey string, c
 	p := url.Values{"cointype": {coinType}, "amount": {fmt.Sprintf("%.8f", amount)}, "rate": {fmt.Sprintf("%.8f", rate)}}
 	if marketType != "" {
 		p.Set("markettype", marketType)
+	} else {
+		p.Set("markettype", "AUD")
 	}
 	return decodeResponse[OrderResponse](ctx, "/my/buy", p, apiKey, secretKey, c)
 }
@@ -871,7 +876,7 @@ func (c *Client) EditOpenMarketBuy(ctx context.Context, apiKey, secretKey string
 
 // PlaceBuyNow places an immediate buy order with optional configuration.
 func (c *Client) PlaceBuyNow(ctx context.Context, apiKey, secretKey string, coinType string, amountType string, amount float64, opts ...BuyNowOpt) (*BuyNowResponse, error) {
-	p := url.Values{"cointype": {coinType}, "amounttype": {amountType}, "amount": {fmt.Sprintf("%.2f", amount)}}
+	p := url.Values{"cointype": {coinType}, "amounttype": {amountType}, "amount": {fmt.Sprintf("%.8f", amount)}}
 	for _, o := range opts {
 		o(p)
 	}
@@ -883,6 +888,8 @@ func (c *Client) PlaceMarketSell(ctx context.Context, apiKey, secretKey string, 
 	p := url.Values{"cointype": {coinType}, "amount": {fmt.Sprintf("%.8f", amount)}, "rate": {fmt.Sprintf("%.8f", rate)}}
 	if marketType != "" {
 		p.Set("markettype", marketType)
+	} else {
+		p.Set("markettype", "AUD")
 	}
 	return decodeResponse[OrderResponse](ctx, "/my/sell", p, apiKey, secretKey, c)
 }
