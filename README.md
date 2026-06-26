@@ -18,25 +18,25 @@ import (
     "github.com/gregdavisd/coinspot_go/coinspot"
 )
 
-func main() \{
+func main() {
     ctx := context.Background()
 
     // 1. Define configuration
-    cfg := coinspot.Config\{
+    cfg := coinspot.Config{
         BaseURL:         "www.coinspot.com.au",
         RateLimitPerMin: 1000, // Matches CoinSpot's hard cap
-        RetryConfig: coinspot.RetryConfig\{
+        RetryConfig: coinspot.RetryConfig{
             MaxRetries: 3,
-            BaseDelay:  500 \* time.Millisecond,
-            MaxDelay:   10 \* time.Second,
-        \},
-    \}
+            BaseDelay:  500 * time.Millisecond,
+            MaxDelay:   10 * time.Second,
+        },
+    }
 
     // 2. Create the master client
     client := coinspot.NewClient(cfg)
 
     // Now you can derive specific clients for different tiers
-\}
+}
 ```
 
 ## 2. Using the Public API
@@ -44,24 +44,24 @@ func main() \{
 The Public API is for market data. It requires **no authentication** and uses `GET` requests.
 
 ```
-func publicExample(ctx context.Context, client \*coinspot.Client) \{
+func publicExample(ctx context.Context, client *coinspot.Client) {
     // Derive the public client
     pub := client.PublicClient()
 
     // Get all latest prices
     prices, err := pub.GetLatestPrices(ctx)
-    if err != nil \{
+    if err != nil {
         log.Fatalf("Error fetching prices: %v", err)
-    \}
-    log.Printf("BTC Bid: %v", prices.Prices\["btc"\].Bid)
+    }
+    log.Printf("BTC Bid: %v", prices.Prices["btc"].Bid)
 
     // Get a specific buy price for a coin
     buyPrice, err := pub.GetLatestBuyPrice(ctx, "BTC")
-    if err != nil \{
+    if err != nil {
         log.Printf("Error: %v", err)
-    \}
+    }
     log.Printf("Current BTC Buy Rate: %v", buyPrice.Rate)
-\}
+}
 ```
 
 ## 3. Using the Full Access API (Trading)
@@ -71,17 +71,17 @@ The Trading API is for executing orders and withdrawals. It requires a **Standar
 **Note:** API keys are passed directly into the method calls, not stored in the client, allowing a single client to manage multiple accounts.
 
 ```
-func tradeExample(ctx context.Context, client \*coinspot.Client) \{
+func tradeExample(ctx context.Context, client *coinspot.Client) {
     trade := client.TradeClient()
-    apiKey := "your\_api\_key"
-    secretKey := "your\_secret\_key"
+    apiKey := "your_api_key"
+    secretKey := "your_secret_key"
 
     // Example 1: Place a Market Buy Order
     order, err := trade.PlaceMarketBuy(ctx, apiKey, secretKey, "BTC", 0.001, 60000.00, "AUD")
-    if err != nil \{
+    if err != nil {
         log.Printf("Order failed: %v", err)
         return
-    \}
+    }
     log.Printf("Order placed! ID: %s", order.ID)
 
     // Example 2: Place a "Buy Now" order with Functional Options
@@ -96,11 +96,11 @@ func tradeExample(ctx context.Context, client \*coinspot.Client) \{
         coinspot.WithRate(60000.00),
         coinspot.WithThreshold(1.0), // 1% threshold
     )
-    if err != nil \{
+    if err != nil {
         log.Printf("BuyNow failed: %v", err)
-    \}
+    }
     log.Printf("Bought amount: %v", buyNow.Amount)
-\}
+}
 ```
 
 ## 4. Using the Read-Only API
@@ -108,22 +108,22 @@ func tradeExample(ctx context.Context, client \*coinspot.Client) \{
 The Read-Only API provides account balances and history. It requires a **Read-Only API Key**.
 
 ```
-func readOnlyExample(ctx context.Context, client \*coinspot.Client) \{
+func readOnlyExample(ctx context.Context, client *coinspot.Client) {
     ro := client.ReadOnlyClient()
-    apiKey := "your\_ro\_api\_key"
-    secretKey := "your\_ro\_secret\_key"
+    apiKey := "your_ro_api_key"
+    secretKey := "your_ro_secret_key"
 
     // Get all account balances
     balances, err := ro.ROGetBalances(ctx, apiKey, secretKey)
-    if err != nil \{
+    if err != nil {
         log.Printf("Error fetching balances: %v", err)
         return
-    \}
+    }
 
-    for coin, bal := range balances.Balances \{
+    for coin, bal := range balances.Balances {
         log.Printf("Coin: %s | Balance: %v | AUD Value: %v", coin, bal.Balance, bal.AudBalance)
-    \}
-\}
+    }
+}
 ```
 
 ## Summary Table for Developers
@@ -140,7 +140,7 @@ func readOnlyExample(ctx context.Context, client \*coinspot.Client) \{
 
 2. **Rate Limits:** If you set `RateLimitPerMin: 1000`, the client will automatically pause execution (sleep) between requests to ensure you never hit the CoinSpot server-side limit.
 
-3. **Error Handling:** Always check the `error` return value. The client automatically converts API `\{"status":"error"\}` responses into Go errors.
+3. **Error Handling:** Always check the `error` return value. The client automatically converts API `{"status":"error"}` responses into Go errors.
 
 4. **Contexts:** Always pass a valid `context.Context`. This allows you to set timeouts for your API calls (e.g., using `context.WithTimeout`).
 
