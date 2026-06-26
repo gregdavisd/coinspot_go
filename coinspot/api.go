@@ -51,15 +51,28 @@ import (
 )
 
 // Global Thread-Safe Strict Nonce Incrementor
+const nonceSeqBits = 20
+
 var (
 	nonceMu sync.Mutex
-	nonce   int64 = 0
+	// Seed nonce from wall-clock time so new processes do not restart near zero.
+	// The low bits are reserved for an in-process sequence when multiple requests
+	// happen in the same millisecond.
+	nonce int64 = time.Now().UnixMilli() << nonceSeqBits
 )
 
 // nextNonce returns a strictly increasing, thread-safe nonce.
 func nextNonce() int64 {
 	nonceMu.Lock()
 	defer nonceMu.Unlock()
+
+	// Keep nonce aligned to current time while preserving strict monotonicity.
+	base := time.Now().UnixMilli() << nonceSeqBits
+	if base > nonce {
+		nonce = base
+		return nonce
+	}
+
 	nonce++
 	return nonce
 }
