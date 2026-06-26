@@ -1,0 +1,12 @@
+.PHONY: build run clean
+
+BINARY=coinspot_gridrobot.exe
+
+build:
+	go build -o $(BINARY) ./cmd/gridrobot
+
+run: build
+	./$(BINARY)
+
+clean:
+	rm -f $(BINARY)

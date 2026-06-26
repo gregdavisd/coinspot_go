@@ -8,7 +8,7 @@ import (
 	"os"
 	"time"
 
-	"coinspot_go/coinspot"
+	"github.com/gregdavisd/coinspot_go/coinspot"
 )
 
 //

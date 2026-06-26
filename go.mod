@@ -1,3 +1,3 @@
-module coinspot_go
+module github.com/gregdavisd/coinspot_go
 
 go 1.21

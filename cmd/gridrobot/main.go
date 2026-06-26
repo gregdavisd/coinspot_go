@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"coinspot_go/coinspot"
+	"github.com/gregdavisd/coinspot_go/coinspot"
 )
 
 // Config holds the robot configuration and tuning parameters.
