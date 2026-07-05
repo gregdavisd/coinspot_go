@@ -8,7 +8,7 @@ The `Client` is initialized using a `Config` struct. You only need to create **o
 
 ### Basic Setup
 
-```
+```go
 package main
 
 import (
@@ -43,7 +43,7 @@ func main() {
 
 The Public API is for market data. It requires **no authentication** and uses `GET` requests.
 
-```
+```go
 func publicExample(ctx context.Context, client *coinspot.Client) {
     // Derive the public client
     pub := client.PublicClient()
@@ -70,7 +70,7 @@ The Trading API is for executing orders and withdrawals. It requires a **Standar
 
 **Note:** API keys are passed directly into the method calls, not stored in the client, allowing a single client to manage multiple accounts.
 
-```
+```go
 func tradeExample(ctx context.Context, client *coinspot.Client) {
     trade := client.TradeClient()
     apiKey := "your_api_key"
@@ -107,7 +107,7 @@ func tradeExample(ctx context.Context, client *coinspot.Client) {
 
 The Read-Only API provides account balances and history. It requires a **Read-Only API Key**.
 
-```
+```go
 func readOnlyExample(ctx context.Context, client *coinspot.Client) {
     ro := client.ReadOnlyClient()
     apiKey := "your_ro_api_key"
